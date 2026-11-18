@@ -9,7 +9,7 @@ const levels = ['ممتاز', 'جيد جداً', 'جيد', 'متوسط', 'يحت
 function reply(data, status = 200) {
   return Response.json(data, {
     status,
-    headers: { 'Cache-Control': 'no-store' },
+    headers: { 'Cache-Control': 'private, no-store' },
   });
 }
 
@@ -24,15 +24,11 @@ function validWeek(value) {
 }
 
 async function handle(request, saving) {
-  if (process.env.NODE_ENV !== 'development') {
-    return reply({ error: 'التقييمات متاحة في وضع التطوير المحلي.' }, 404);
-  }
-
   const base = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY;
 
   if (!base || !key?.startsWith('sb_secret_')) {
-    return reply({ error: 'تحقق من إعدادات Supabase في .env.local.' }, 503);
+    return reply({ error: 'تحقق من متغيرات Supabase على الخادم.' }, 503);
   }
 
   try {
@@ -54,30 +50,44 @@ async function handle(request, saving) {
     if (saving) {
       const { subject, week, entries } = input;
 
-      if (!subjects.includes(subject) || !Array.isArray(entries) ||
-          entries.length === 0 || entries.length > 250 ||
-          entries.some(row =>
-            !Number.isSafeInteger(row?.id) || row.id <= 0 ||
-            (row.rating !== null && !levels.includes(row.rating))
-          ) ||
-          new Set(entries.map(row => row.id)).size !== entries.length) {
+      if (
+        !subjects.includes(subject) ||
+        !Array.isArray(entries) ||
+        entries.length === 0 ||
+        entries.length > 250 ||
+        entries.some(row =>
+          !Number.isSafeInteger(row?.id) ||
+          row.id <= 0 ||
+          (row.rating !== null && !levels.includes(row.rating))
+        ) ||
+        new Set(entries.map(row => row.id)).size !== entries.length
+      ) {
         return reply({ error: 'بيانات التقييم غير صالحة.' }, 400);
       }
 
       url.searchParams.set('on_conflict', 'student_id,subject,week_end');
-      options.method = 'POST';
-      options.headers['Content-Type'] = 'application/json';
-      options.headers.Prefer = 'resolution=merge-duplicates,return=minimal';
-      options.body = JSON.stringify(entries.map(row => ({
-        student_id: row.id,
-        subject,
-        week_end: week,
-        rating: row.rating,
-      })));
 
-      const result = await fetch(url, options);
+      const result = await fetch(url, {
+        ...options,
+        method: 'POST',
+        headers: {
+          ...options.headers,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify(entries.map(row => ({
+          student_id: row.id,
+          subject,
+          week_end: week,
+          rating: row.rating,
+        }))),
+      });
+
       if (!result.ok) {
-        return reply({ error: `تعذّر الحفظ في Supabase (${result.status}).` }, 502);
+        return reply(
+          { error: `تعذّر الحفظ في Supabase (${result.status}).` },
+          502,
+        );
       }
 
       return reply({ saved: entries.length });
@@ -93,20 +103,26 @@ async function handle(request, saving) {
       if (!subjects.includes(input.subject)) {
         return reply({ error: 'المادة غير صالحة.' }, 400);
       }
+
       url.searchParams.set('subject', `eq.${input.subject}`);
     }
 
     const rows = [];
+
     for (let offset = 0; ; offset += 100) {
       url.searchParams.set('offset', String(offset));
       const result = await fetch(url, options);
 
       if (!result.ok) {
-        return reply({ error: `تعذّرت قراءة جدول التقييمات (${result.status}).` }, 502);
+        return reply(
+          { error: `تعذّرت قراءة جدول التقييمات (${result.status}).` },
+          502,
+        );
       }
 
       const batch = await result.json();
       rows.push(...batch);
+
       if (batch.length < 100) return reply(rows);
     }
   } catch {
@@ -119,8 +135,11 @@ export function GET(request) {
 }
 
 export function POST(request) {
-  if (request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json') {
+  const contentType = request.headers.get('content-type')?.split(';')[0].trim();
+
+  if (contentType !== 'application/json') {
     return reply({ error: 'صيغة الطلب غير مدعومة.' }, 415);
   }
+
   return handle(request, true);
 }
