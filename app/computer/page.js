@@ -23,12 +23,58 @@ const emptyNotes = {
 
 const number = new Intl.NumberFormat('ar-IQ');
 
+const alphabetical = new Intl.Collator('ar-IQ', {
+  usage: 'sort',
+  sensitivity: 'base',
+  numeric: true,
+});
+
 function classKey(grade, section) {
   return JSON.stringify([grade, section]);
 }
 
 function scoreKey(id, subject) {
   return JSON.stringify([String(id), subject]);
+}
+
+function compareNames(a, b) {
+  return (
+    alphabetical.compare(
+      (a.full_name || '').trim(),
+      (b.full_name || '').trim()
+    ) ||
+    alphabetical.compare(a.grade || '', b.grade || '') ||
+    alphabetical.compare(a.section || '', b.section || '') ||
+    alphabetical.compare(String(a.id), String(b.id))
+  );
+}
+
+function gradeOrder(value) {
+  const normalized = String(value || '')
+    .replace(/[أإآ]/g, 'ا')
+    .trim();
+
+  const names = [
+    'الاول',
+    'الثاني',
+    'الثالث',
+    'الرابع',
+    'الخامس',
+    'السادس',
+  ];
+
+  const index = names.findIndex(name => normalized.includes(name));
+
+  return index === -1 ? 100 : index;
+}
+
+function sortRoster(rows) {
+  return [...rows].sort((a, b) =>
+    gradeOrder(a.grade) - gradeOrder(b.grade) ||
+    alphabetical.compare(a.grade || '', b.grade || '') ||
+    alphabetical.compare(a.section || '', b.section || '') ||
+    compareNames(a, b)
+  );
 }
 
 function today() {
@@ -77,7 +123,9 @@ async function readList(url, signal) {
     throw new Error('البيانات المستلمة غير صالحة.');
   }
 
-  return rows;
+  return String(url).startsWith('/api/roster')
+    ? sortRoster(rows)
+    : rows;
 }
 
 function useUnsavedWarning(dirty) {
@@ -90,12 +138,17 @@ function useUnsavedWarning(dirty) {
     }
 
     window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
+
+    return () => {
+      window.removeEventListener('beforeunload', warn);
+    };
   }, [dirty]);
 }
 
 function mergeRows(previous, incoming, getKey) {
-  const rows = new Map(previous.map(row => [getKey(row), row]));
+  const rows = new Map(
+    previous.map(row => [getKey(row), row])
+  );
 
   for (const row of incoming) {
     rows.set(getKey(row), row);
@@ -104,13 +157,15 @@ function mergeRows(previous, incoming, getKey) {
   return [...rows.values()];
 }
 
+/* صناعة ملفات PDF */
 async function exportBook(students, options) {
   const monthly = options.kind === 'monthly';
+  const orderedStudents = sortRoster(students);
 
-  /*
-   * الاسم الذي يظهر على البطاقة يدخله المستخدم.
-   * الشهر المستخدم لجلب الدرجات من قاعدة البيانات يبقى كما هو.
-   */
+  if (!orderedStudents.length) {
+    throw new Error('لا يوجد طلاب لتنزيل بطاقاتهم.');
+  }
+
   let printedMonth = '';
 
   if (monthly) {
@@ -130,12 +185,8 @@ async function exportBook(students, options) {
     }
 
     if (printedMonth.length > 60) {
-      throw new Error('اسم الشهر طويل. استخدم اسماً لا يتجاوز ٦٠ حرفاً.');
+      throw new Error('اسم الشهر يجب ألا يتجاوز ٦٠ حرفاً.');
     }
-  }
-
-  if (!students.length) {
-    throw new Error('لا يوجد طلاب لتنزيل بطاقاتهم.');
   }
 
   const { jsPDF } = await import('jspdf');
@@ -145,15 +196,13 @@ async function exportBook(students, options) {
   await document.fonts.ready;
 
   const logo = new Image();
-
-  // الشعار الجديد المخصص للكروت.
   logo.src = '/hanan-logo-new.png';
 
   try {
     await logo.decode();
   } catch {
     throw new Error(
-      'تعذّر تحميل الشعار الجديد. ضع الصورة داخل public باسم hanan-logo-new.png.'
+      'تعذّر تحميل الشعار. ضع الصورة داخل public باسم hanan-logo-new.png.'
     );
   }
 
@@ -193,7 +242,6 @@ async function exportBook(students, options) {
   });
 
   const canvas = document.createElement('canvas');
-
   canvas.width = 1600;
   canvas.height = 2263;
 
@@ -203,9 +251,7 @@ async function exportBook(students, options) {
     throw new Error('تعذّر تجهيز صفحات PDF.');
   }
 
-  const blue = '#34799b';
-  const green = '#27664c';
-  const accent = monthly ? blue : green;
+  const accent = monthly ? '#34799b' : '#27664c';
   const pale = monthly ? '#e5f2f8' : '#e9f3ec';
   const font = '"IBM Plex Sans Arabic", Tahoma, Arial, sans-serif';
 
@@ -223,7 +269,6 @@ async function exportBook(students, options) {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#1c303d';
     ctx.font = `${bold ? '700' : '400'} ${size}px ${font}`;
-
     ctx.fillText(String(value), x, y, max);
   }
 
@@ -236,7 +281,6 @@ async function exportBook(students, options) {
 
   function wrap(value, width, size) {
     ctx.font = `400 ${size}px ${font}`;
-
     const result = [];
 
     for (const paragraph of String(value).split('\n')) {
@@ -268,16 +312,12 @@ async function exportBook(students, options) {
     initialSize = 23
   ) {
     const content = String(value ?? '').trim();
-
     if (!content) return;
 
     let size = initialSize;
     let lines = wrap(content, width, size);
 
-    while (
-      size > 10 &&
-      lines.length * size * 1.55 > height
-    ) {
+    while (size > 10 && lines.length * size * 1.55 > height) {
       size -= 1;
       lines = wrap(content, width, size);
     }
@@ -302,7 +342,6 @@ async function exportBook(students, options) {
 
   function headingBox(x, y, width, height, label) {
     ctx.fillStyle = pale;
-
     ctx.fillRect(x, y, width, height);
     ctx.strokeRect(x, y, width, height);
 
@@ -323,11 +362,9 @@ async function exportBook(students, options) {
 
     ctx.fillStyle = '#fff';
     ctx.fillRect(left, top, right - left, height);
-
     ctx.strokeStyle = accent;
     ctx.lineWidth = 2;
 
-    // زخارف خفيفة في زوايا البطاقة.
     ctx.fillStyle = monthly ? '#edf6fb' : '#f0f7f2';
 
     ctx.beginPath();
@@ -346,7 +383,6 @@ async function exportBook(students, options) {
 
     ctx.strokeRect(left, top, right - left, height);
 
-    // وضع الشعار ضمن مساحة ثابتة للحفاظ على تناسبه.
     const logoBox = {
       x: right - 165,
       y: top + 30,
@@ -354,13 +390,13 @@ async function exportBook(students, options) {
       height: 135,
     };
 
-    const logoScale = Math.min(
+    const scale = Math.min(
       logoBox.width / logo.naturalWidth,
       logoBox.height / logo.naturalHeight
     );
 
-    const logoWidth = logo.naturalWidth * logoScale;
-    const logoHeight = logo.naturalHeight * logoScale;
+    const logoWidth = logo.naturalWidth * scale;
+    const logoHeight = logo.naturalHeight * scale;
 
     ctx.drawImage(
       logo,
@@ -413,11 +449,8 @@ async function exportBook(students, options) {
       440
     );
 
-    // لا يُستخدم اسم الشهر الميلادي في البطاقة الشهرية.
     text(
-      monthly
-        ? printedMonth
-        : `الأسبوع: ${options.week}`,
+      monthly ? printedMonth : `الأسبوع: ${options.week}`,
       390,
       top + 208,
       24,
@@ -433,13 +466,7 @@ async function exportBook(students, options) {
     const rowHeight = 57;
 
     ctx.fillStyle = pale;
-
-    ctx.fillRect(
-      tableX,
-      tableTop,
-      tableRight - tableX,
-      rowHeight
-    );
+    ctx.fillRect(tableX, tableTop, tableRight - tableX, rowHeight);
 
     text(
       'المادة',
@@ -464,13 +491,7 @@ async function exportBook(students, options) {
 
       if (index % 2) {
         ctx.fillStyle = '#f8fbfd';
-
-        ctx.fillRect(
-          tableX,
-          y,
-          tableRight - tableX,
-          rowHeight
-        );
+        ctx.fillRect(tableX, y, tableRight - tableX, rowHeight);
       }
 
       text(
@@ -516,12 +537,7 @@ async function exportBook(students, options) {
       rowHeight * 10
     );
 
-    line(
-      divider,
-      tableTop,
-      divider,
-      tableTop + rowHeight * 10
-    );
+    line(divider, tableTop, divider, tableTop + rowHeight * 10);
 
     for (let row = 1; row < 10; row += 1) {
       line(
@@ -533,39 +549,15 @@ async function exportBook(students, options) {
     }
 
     if (monthly) {
-      const observation =
-        notes.get(String(student.id)) || {
-          positive: '',
-          negative: '',
-          notes: '',
-        };
-
+      const observation = notes.get(String(student.id)) || emptyNotes;
       const sideX = 965;
       const sideWidth = 525;
       const middle = sideX + sideWidth / 2;
 
-      // السلوك.
-      headingBox(
-        sideX,
-        tableTop,
-        sideWidth,
-        57,
-        'السلوك'
-      );
+      headingBox(sideX, tableTop, sideWidth, 57, 'السلوك');
 
-      ctx.strokeRect(
-        sideX,
-        tableTop + 57,
-        sideWidth,
-        180
-      );
-
-      line(
-        middle,
-        tableTop + 57,
-        middle,
-        tableTop + 237
-      );
+      ctx.strokeRect(sideX, tableTop + 57, sideWidth, 180);
+      line(middle, tableTop + 57, middle, tableTop + 237);
 
       text(
         'الموجب',
@@ -601,25 +593,12 @@ async function exportBook(students, options) {
         112
       );
 
-      // الملاحظات: مربع فارغ بدون أي خطوط داخلية.
       const notesTop = tableTop + 260;
 
-      headingBox(
-        sideX,
-        notesTop,
-        sideWidth,
-        57,
-        'ملاحظات'
-      );
+      headingBox(sideX, notesTop, sideWidth, 57, 'ملاحظات');
+      ctx.strokeRect(sideX, notesTop + 57, sideWidth, 253);
 
-      ctx.strokeRect(
-        sideX,
-        notesTop + 57,
-        sideWidth,
-        253
-      );
-
-      // تظهر الملاحظات المحفوظة فقط إن كانت موجودة.
+      // لا توجد خطوط داخل مربع الملاحظات.
       paragraph(
         observation.notes,
         sideX + sideWidth - 20,
@@ -633,7 +612,6 @@ async function exportBook(students, options) {
         classKey(student.grade, student.section)
       );
 
-      // اسم المرشد، بدون خط توقيع.
       text(
         `المرشد: ${advisor || 'لم يُحدد'}`,
         1490,
@@ -644,102 +622,37 @@ async function exportBook(students, options) {
         515
       );
 
-      text(
-        'ولي الأمر',
-        1490,
-        top + 965,
-        26,
-        true
-      );
+      text('ولي الأمر', 1490, top + 965, 26, true);
+      line(1010, top + 965, 1355, top + 965);
 
-      line(
-        1010,
-        top + 965,
-        1355,
-        top + 965
-      );
-
-      text(
-        'مدير المدرسة',
-        895,
-        top + 910,
-        26,
-        true
-      );
-
-      line(
-        140,
-        top + 910,
-        700,
-        top + 910
-      );
+      text('مدير المدرسة', 895, top + 910, 26, true);
+      line(140, top + 910, 700, top + 910);
     } else {
-      text(
-        'الملاحظات:',
-        1490,
-        top + 872,
-        26
-      );
+      text('الملاحظات:', 1490, top + 872, 26);
 
-      text(
-        'مدير المدرسة',
-        1490,
-        top + 950,
-        26,
-        true
-      );
+      text('مدير المدرسة', 1490, top + 950, 26, true);
+      line(920, top + 950, 1300, top + 950);
 
-      line(
-        920,
-        top + 950,
-        1300,
-        top + 950
-      );
-
-      text(
-        'ولي الأمر',
-        700,
-        top + 950,
-        26,
-        true
-      );
-
-      line(
-        140,
-        top + 950,
-        550,
-        top + 950
-      );
+      text('ولي الأمر', 700, top + 950, 26, true);
+      line(140, top + 950, 550, top + 950);
     }
   }
 
-  for (let index = 0; index < students.length; index += 2) {
+  for (let index = 0; index < orderedStudents.length; index += 2) {
     if (index) pdf.addPage();
 
     ctx.fillStyle = '#fff';
-    ctx.fillRect(
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    );
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    drawCard(students[index], 75);
+    drawCard(orderedStudents[index], 75);
 
-    if (students[index + 1]) {
+    if (orderedStudents[index + 1]) {
       ctx.strokeStyle = '#b8cbd5';
       ctx.setLineDash([10, 12]);
-
-      line(
-        80,
-        1127,
-        1520,
-        1127
-      );
-
+      line(80, 1127, 1520, 1127);
       ctx.setLineDash([]);
 
-      drawCard(students[index + 1], 1180);
+      drawCard(orderedStudents[index + 1], 1180);
     }
 
     pdf.addImage(
@@ -772,9 +685,13 @@ function StudentManager({ students, refresh }) {
   const [section, setSection] = useState('');
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const [message, setMessage] = useState('');
+  const [messageError, setMessageError] = useState(false);
 
-  useUnsavedWarning(Boolean(draft));
+  const busy = saving || deletingId !== null;
+
+  useUnsavedWarning(Boolean(draft) || busy);
 
   const grades = [...new Set(students.map(row => row.grade))];
 
@@ -782,16 +699,21 @@ function StudentManager({ students, refresh }) {
     students
       .filter(row => !grade || row.grade === grade)
       .map(row => row.section)
-  )];
+  )].sort(alphabetical.compare);
 
-  const visible = students.filter(row =>
-    (!grade || row.grade === grade) &&
-    (!section || row.section === section) &&
-    row.full_name.includes(search.trim())
-  );
+  const visible = students
+    .filter(row =>
+      (!grade || row.grade === grade) &&
+      (!section || row.section === section) &&
+      row.full_name.includes(search.trim())
+    )
+    .sort(compareNames);
 
   function edit(student) {
+    if (busy) return;
+
     setMessage('');
+    setMessageError(false);
 
     setDraft(student ? {
       id: Number(student.id),
@@ -810,10 +732,12 @@ function StudentManager({ students, refresh }) {
 
   async function save(event) {
     event.preventDefault();
-    if (saving || !draft) return;
+
+    if (busy || !draft) return;
 
     setSaving(true);
     setMessage('');
+    setMessageError(false);
 
     try {
       await request('/api/students', {
@@ -828,10 +752,76 @@ function StudentManager({ students, refresh }) {
         await refresh();
         setMessage('تم حفظ بيانات الطالب.');
       } catch {
-        setMessage('تم الحفظ. أعد تحميل القائمة لعرض آخر البيانات.');
+        setMessage('تم الحفظ، لكن تعذّر تحديث القائمة. أعد تحميل القائمة.');
+        setMessageError(true);
       }
     } catch (error) {
       setMessage(error.message);
+      setMessageError(true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteStudent(student) {
+    if (busy || draft) return;
+
+    const confirmed = window.confirm(
+      `هل تريد حذف الطالب "${student.full_name}"؟\n\n` +
+      `الصف: ${student.grade} — الشعبة: ${student.section}\n\n` +
+      'سيتم حذف الطالب وجميع درجاته وتقييماته وملاحظاته نهائياً.'
+    );
+
+    if (!confirmed) return;
+
+    const id = Number(student.id);
+
+    setDeletingId(id);
+    setMessage('');
+    setMessageError(false);
+
+    try {
+      const result = await request('/api/students/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+
+      if (result.deleted !== true) {
+        throw new Error('تعذّر التحقق من نجاح الحذف. أعد تحميل القائمة.');
+      }
+
+      try {
+        await refresh(id);
+        setMessage(`تم حذف الطالب "${student.full_name}".`);
+      } catch {
+        setMessage(
+          `تم حذف الطالب "${student.full_name}"، ` +
+          'لكن تعذّر تحديث بقية القائمة. أعد تحميل القائمة.'
+        );
+        setMessageError(true);
+      }
+    } catch (error) {
+      setMessage(error.message);
+      setMessageError(true);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function reload() {
+    if (busy) return;
+
+    setSaving(true);
+    setMessage('');
+    setMessageError(false);
+
+    try {
+      await refresh();
+      setMessage('تم تحديث قائمة الطلاب.');
+    } catch (error) {
+      setMessage(error.message);
+      setMessageError(true);
     } finally {
       setSaving(false);
     }
@@ -842,16 +832,39 @@ function StudentManager({ students, refresh }) {
       <div className="cp-toolbar">
         <div>
           <h2>إدارة الطلاب</h2>
-          <p className="cp-muted">{visible.length} من {students.length} طالب</p>
+          <p className="cp-muted">
+            {number.format(visible.length)}
+            {' من '}
+            {number.format(students.length)}
+            {' طالب · مرتّبة أبجدياً'}
+          </p>
         </div>
-        <button disabled={saving || !!draft} onClick={() => edit()}>
-          ＋ إضافة طالب
-        </button>
+
+        <div className="cp-actions">
+          <button
+            type="button"
+            className="cp-quiet"
+            disabled={busy}
+            onClick={reload}
+          >
+            إعادة تحميل القائمة
+          </button>
+
+          <button
+            type="button"
+            disabled={busy || Boolean(draft)}
+            onClick={() => edit()}
+          >
+            ＋ إضافة طالب
+          </button>
+        </div>
       </div>
 
       {draft && (
         <form className="cp-editor" onSubmit={save}>
-          <h3>{draft.id === null ? 'إضافة طالب' : 'تعديل معلومات الطالب'}</h3>
+          <h3>
+            {draft.id === null ? 'إضافة طالب' : 'تعديل معلومات الطالب'}
+          </h3>
 
           <div className="cp-filters">
             {[
@@ -866,7 +879,7 @@ function StudentManager({ students, refresh }) {
                   value={draft[field]}
                   required={field !== 'enrollment_status'}
                   maxLength={limit}
-                  disabled={saving}
+                  disabled={busy}
                   onChange={event => {
                     const value = event.target.value;
                     setDraft(previous => ({ ...previous, [field]: value }));
@@ -877,13 +890,14 @@ function StudentManager({ students, refresh }) {
           </div>
 
           <div className="cp-actions">
-            <button type="submit" disabled={saving}>
-              {saving ? 'جارٍ الحفظ…' : 'حفظ الطالب'}
+            <button type="submit" disabled={busy}>
+              {saving ? 'جارٍ الحفظ…' : 'حفظ بيانات الطالب'}
             </button>
+
             <button
               type="button"
               className="cp-quiet"
-              disabled={saving}
+              disabled={busy}
               onClick={() => setDraft(null)}
             >
               إلغاء
@@ -898,16 +912,21 @@ function StudentManager({ students, refresh }) {
           <input
             type="search"
             value={search}
+            disabled={busy}
             onChange={event => setSearch(event.target.value)}
           />
         </label>
 
         <label>
           الصف
-          <select value={grade} onChange={event => {
-            setGrade(event.target.value);
-            setSection('');
-          }}>
+          <select
+            value={grade}
+            disabled={busy}
+            onChange={event => {
+              setGrade(event.target.value);
+              setSection('');
+            }}
+          >
             <option value="">كل الصفوف</option>
             {grades.map(value => <option key={value}>{value}</option>)}
           </select>
@@ -915,41 +934,72 @@ function StudentManager({ students, refresh }) {
 
         <label>
           الشعبة
-          <select value={section} onChange={event => setSection(event.target.value)}>
+          <select
+            value={section}
+            disabled={busy}
+            onChange={event => setSection(event.target.value)}
+          >
             <option value="">كل الشعب</option>
             {sections.map(value => <option key={value}>{value}</option>)}
           </select>
         </label>
       </div>
 
-      {message && <p className="cp-message" role="status">{message}</p>}
+      {message && (
+        <p
+          className={messageError ? 'cp-error' : 'cp-message'}
+          role={messageError ? 'alert' : 'status'}
+        >
+          {message}
+        </p>
+      )}
 
       <div className="cp-table">
         <table>
           <thead>
             <tr>
-              <th>اسم الطالب</th>
-              <th>الصف</th>
-              <th>الشعبة</th>
-              <th>الحالة</th>
-              <th>الإجراء</th>
+              <th scope="col">ت</th>
+              <th scope="col">اسم الطالب</th>
+              <th scope="col">الصف</th>
+              <th scope="col">الشعبة</th>
+              <th scope="col">الحالة</th>
+              <th scope="col">الإجراءات</th>
             </tr>
           </thead>
+
           <tbody>
-            {visible.map(student => (
+            {visible.map((student, index) => (
               <tr key={student.id}>
+                <td>{number.format(index + 1)}</td>
                 <th scope="row">{student.full_name}</th>
                 <td>{student.grade}</td>
                 <td>{student.section}</td>
                 <td>{student.enrollment_status || '—'}</td>
+
                 <td>
-                  <button
-                    className="cp-quiet"
-                    disabled={saving || !!draft}
-                    onClick={() => edit(student)}
-                  >
-                    تعديل
-                  </button>
+                  <div className="cp-row-actions">
+                    <button
+                      type="button"
+                      className="cp-quiet"
+                      disabled={busy || Boolean(draft)}
+                      aria-label={`تعديل ${student.full_name}`}
+                      onClick={() => edit(student)}
+                    >
+                      تعديل
+                    </button>
+
+                    <button
+                      type="button"
+                      className="cp-danger"
+                      disabled={busy || Boolean(draft)}
+                      aria-label={`حذف ${student.full_name}`}
+                      onClick={() => deleteStudent(student)}
+                    >
+                      {deletingId === Number(student.id)
+                        ? 'جارٍ الحذف…'
+                        : 'حذف'}
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -957,12 +1007,14 @@ function StudentManager({ students, refresh }) {
         </table>
       </div>
 
-      {!visible.length && <p className="cp-muted">لا يوجد طلاب مطابقون.</p>}
+      {!visible.length && (
+        <p className="cp-muted">لا يوجد طلاب مطابقون للبحث.</p>
+      )}
     </section>
   );
 }
 
-/* قائمة مرشدي الصفوف */
+/* مرشدو الصفوف */
 function AdvisorManager({ students, advisors, onSaved }) {
   const [changes, setChanges] = useState({});
   const [saving, setSaving] = useState(false);
@@ -1015,7 +1067,6 @@ function AdvisorManager({ students, advisors, onSaved }) {
     try {
       const entries = Object.entries(changes).map(([key, name]) => {
         const [grade, section] = JSON.parse(key);
-
         return { grade, section, advisor_name: name };
       });
 
@@ -1052,15 +1103,19 @@ function AdvisorManager({ students, advisors, onSaved }) {
           <table>
             <thead>
               <tr>
-                <th>الصف</th>
-                <th>الشعبة</th>
-                <th>الطلاب</th>
-                <th>اسم المرشد</th>
+                <th scope="col">الصف</th>
+                <th scope="col">الشعبة</th>
+                <th scope="col">الطلاب</th>
+                <th scope="col">اسم المرشد</th>
               </tr>
             </thead>
+
             <tbody>
               {[...classes.entries()].map(([key, group]) => (
-                <tr key={key} className={Object.hasOwn(changes, key) ? 'cp-pending' : ''}>
+                <tr
+                  key={key}
+                  className={Object.hasOwn(changes, key) ? 'cp-pending' : ''}
+                >
                   <th scope="row">{group.grade}</th>
                   <td>{group.section}</td>
                   <td>{number.format(group.count)}</td>
@@ -1088,6 +1143,7 @@ function AdvisorManager({ students, advisors, onSaved }) {
                 : 'يمكن تعديل الأسماء في أي وقت.'
             )}
           </p>
+
           <button type="submit" disabled={saving || !changedCount}>
             {saving ? 'جارٍ الحفظ…' : 'حفظ أسماء المرشدين'}
           </button>
@@ -1120,11 +1176,13 @@ function WeeklyReports({ students }) {
     readList(
       `/api/ratings?${new URLSearchParams({ week: query.week })}`,
       controller.signal
-    ).then(rows => {
-      if (!controller.signal.aborted) setRatings(rows);
-    }).catch(cause => {
-      if (!controller.signal.aborted) setError(cause.message);
-    });
+    )
+      .then(rows => {
+        if (!controller.signal.aborted) setRatings(rows);
+      })
+      .catch(cause => {
+        if (!controller.signal.aborted) setError(cause.message);
+      });
 
     return () => controller.abort();
   }, [query]);
@@ -1195,14 +1253,18 @@ function WeeklyReports({ students }) {
     <section className="cp-card">
       <h2>الإنجاز والتقارير الأسبوعية</h2>
 
-      <form className="cp-inline" onSubmit={event => {
-        event.preventDefault();
-        if (!date || exporting) return;
-        setRatings(null);
-        setError('');
-        setMessage('');
-        setQuery({ week: date });
-      }}>
+      <form
+        className="cp-inline"
+        onSubmit={event => {
+          event.preventDefault();
+          if (!date || exporting) return;
+
+          setRatings(null);
+          setError('');
+          setMessage('');
+          setQuery({ week: date });
+        }}
+      >
         <label>
           الأسبوع المنتهي في
           <input
@@ -1214,22 +1276,41 @@ function WeeklyReports({ students }) {
             onChange={event => setDate(event.target.value)}
           />
         </label>
-        <button disabled={!date || exporting}>عرض الإنجاز</button>
+
+        <button type="submit" disabled={!date || exporting}>
+          عرض الإنجاز
+        </button>
       </form>
 
       {error && <p className="cp-error" role="alert">{error}</p>}
-      {query && ratings === null && !error && <p role="status">جارٍ التحميل…</p>}
+
+      {query && ratings === null && !error && (
+        <p role="status">جارٍ التحميل…</p>
+      )}
 
       {ratings !== null && (
         <>
           <div className="cp-metrics">
-            <div><span>الطلاب</span><strong>{students.length}</strong></div>
-            <div><span>التقييمات</span><strong>{done} / {students.length * subjects.length}</strong></div>
-            <div><span>الإنجاز</span><strong>{percent(done, students.length * subjects.length)}</strong></div>
+            <div>
+              <span>الطلاب</span>
+              <strong>{students.length}</strong>
+            </div>
+            <div>
+              <span>التقييمات</span>
+              <strong>{done} / {students.length * subjects.length}</strong>
+            </div>
+            <div>
+              <span>الإنجاز</span>
+              <strong>{percent(done, students.length * subjects.length)}</strong>
+            </div>
           </div>
 
           <div className="cp-actions">
-            <button disabled={exporting || !students.length} onClick={download}>
+            <button
+              type="button"
+              disabled={exporting || !students.length}
+              onClick={download}
+            >
               {exporting ? 'جارٍ تجهيز PDF…' : 'تنزيل كتاب التقييمات PDF'}
             </button>
             <span role="status">{message}</span>
@@ -1240,11 +1321,17 @@ function WeeklyReports({ students }) {
               <summary>
                 {group.grade} · الشعبة {group.section} · {group.count} طالب
               </summary>
+
               <div className="cp-table">
                 <table>
                   <thead>
-                    <tr><th>المادة</th><th>المحفوظ</th><th>الإنجاز</th></tr>
+                    <tr>
+                      <th scope="col">المادة</th>
+                      <th scope="col">المحفوظ</th>
+                      <th scope="col">الإنجاز</th>
+                    </tr>
                   </thead>
+
                   <tbody>
                     {subjects.map(subject => {
                       const count = group.counts.get(subject) || 0;
@@ -1268,7 +1355,7 @@ function WeeklyReports({ students }) {
   );
 }
 
-/* الدرجات الشهرية والسلوك وتنزيل البطاقات */
+/* الدرجات الشهرية والسلوك والكروت */
 function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
   const [month, setMonth] = useState('');
   const [query, setQuery] = useState(null);
@@ -1294,6 +1381,21 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
   }, []);
 
   useEffect(() => {
+    const existingIds = new Set(
+      students.map(student => String(student.id))
+    );
+
+    setChanges(previous => {
+      const entries = Object.entries(previous);
+      const remaining = entries.filter(([id]) => existingIds.has(id));
+
+      return remaining.length === entries.length
+        ? previous
+        : Object.fromEntries(remaining);
+    });
+  }, [students]);
+
+  useEffect(() => {
     if (!query) return;
 
     const controller = new AbortController();
@@ -1302,13 +1404,15 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
     Promise.all([
       readList(`/api/grades?${params}`, controller.signal),
       readList(`/api/students/monthly?${params}`, controller.signal),
-    ]).then(([grades, notes]) => {
-      if (!controller.signal.aborted) {
-        setData({ month: query.month, grades, notes });
-      }
-    }).catch(cause => {
-      if (!controller.signal.aborted) setError(cause.message);
-    });
+    ])
+      .then(([grades, notes]) => {
+        if (!controller.signal.aborted) {
+          setData({ month: query.month, grades, notes });
+        }
+      })
+      .catch(cause => {
+        if (!controller.signal.aborted) setError(cause.message);
+      });
 
     return () => controller.abort();
   }, [query]);
@@ -1319,12 +1423,14 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
     students
       .filter(row => !grade || row.grade === grade)
       .map(row => row.section)
-  )];
+  )].sort(alphabetical.compare);
 
-  const visible = students.filter(row =>
-    (!grade || row.grade === grade) &&
-    (!section || row.section === section) &&
-    row.full_name.includes(search.trim())
+  const visible = sortRoster(
+    students.filter(row =>
+      (!grade || row.grade === grade) &&
+      (!section || row.section === section) &&
+      row.full_name.includes(search.trim())
+    )
   );
 
   const scores = new Map((data?.grades || []).map(row => [
@@ -1347,7 +1453,10 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
   for (const student of visible) {
     for (const subject of subjects) {
       const value = scores.get(scoreKey(student.id, subject));
-      if (value !== null && value !== undefined) completed += 1;
+
+      if (value !== null && value !== undefined) {
+        completed += 1;
+      }
     }
   }
 
@@ -1386,7 +1495,12 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
 
     if (!month || busy) return;
 
-    if (dirty && !window.confirm('عندك سلوك أو ملاحظات غير محفوظة. تريد تغيير الشهر؟')) {
+    if (
+      dirty &&
+      !window.confirm(
+        'عندك سلوك أو ملاحظات غير محفوظة. تريد تغيير الشهر؟'
+      )
+    ) {
       return;
     }
 
@@ -1404,15 +1518,30 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
     setMessage('');
 
     try {
-      const entries = Object.entries(changes).map(([id, values]) => ({
-        id: Number(id),
-        ...values,
-      }));
+      const existingIds = new Set(
+        students.map(student => String(student.id))
+      );
+
+      const entries = Object.entries(changes)
+        .filter(([id]) => existingIds.has(id))
+        .map(([id, values]) => ({
+          id: Number(id),
+          ...values,
+        }));
+
+      if (!entries.length) {
+        setChanges({});
+        setMessage('لا توجد تغييرات تخص طلاباً موجودين.');
+        return;
+      }
 
       const result = await request('/api/students/monthly', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ month: data.month, entries }),
+        body: JSON.stringify({
+          month: data.month,
+          entries,
+        }),
       });
 
       setData(previous => ({
@@ -1442,7 +1571,6 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
     try {
       const params = new URLSearchParams({ month: data.month });
 
-      // قراءة أسماء المرشدين من قاعدة البيانات وقت تنزيل الملف.
       const [freshGrades, freshNotes, freshAdvisors] = await Promise.all([
         readList(`/api/grades?${params}`),
         readList(`/api/students/monthly?${params}`),
@@ -1482,14 +1610,14 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
           <span className="cp-badge">بطاقات الطلاب</span>
           <h2>الدرجات والبطاقات الشهرية</h2>
           <p className="cp-muted">
-            يظهر اسم المرشد تلقائياً حسب صف الطالب وشعبته.
+            يظهر اسم المرشد حسب صف الطالب وشعبته، وتكتب اسم الشهر عند التنزيل.
           </p>
         </div>
       </div>
 
       <form className="cp-inline" onSubmit={loadMonth}>
         <label>
-          الشهر
+          شهر البيانات المحفوظة
           <input
             type="month"
             min="1900-01"
@@ -1501,11 +1629,17 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
             onChange={event => setMonth(event.target.value)}
           />
         </label>
-        <button disabled={busy || !month}>عرض الدرجات</button>
+
+        <button type="submit" disabled={busy || !month}>
+          عرض الدرجات
+        </button>
       </form>
 
       {error && <p className="cp-error" role="alert">{error}</p>}
-      {query && !data && !error && <p role="status">جارٍ تحميل الدرجات…</p>}
+
+      {query && !data && !error && (
+        <p role="status">جارٍ تحميل الدرجات…</p>
+      )}
 
       {data && (
         <>
@@ -1519,16 +1653,22 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
                 onChange={event => setSearch(event.target.value)}
               />
             </label>
+
             <label>
               الصف
-              <select disabled={busy} value={grade} onChange={event => {
-                setGrade(event.target.value);
-                setSection('');
-              }}>
+              <select
+                disabled={busy}
+                value={grade}
+                onChange={event => {
+                  setGrade(event.target.value);
+                  setSection('');
+                }}
+              >
                 <option value="">كل الصفوف</option>
                 {grades.map(value => <option key={value}>{value}</option>)}
               </select>
             </label>
+
             <label>
               الشعبة
               <select
@@ -1543,17 +1683,31 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
           </div>
 
           <div className="cp-metrics">
-            <div><span>الشهر المعروض</span><strong>{monthLabel(data.month)}</strong></div>
-            <div><span>الطلاب الظاهرون</span><strong>{visible.length}</strong></div>
-            <div><span>الدرجات المحفوظة</span><strong>{completed} / {visible.length * subjects.length}</strong></div>
+            <div>
+              <span>شهر البيانات</span>
+              <strong>{monthLabel(data.month)}</strong>
+            </div>
+            <div>
+              <span>الطلاب الظاهرون</span>
+              <strong>{visible.length}</strong>
+            </div>
+            <div>
+              <span>الدرجات المحفوظة</span>
+              <strong>{completed} / {visible.length * subjects.length}</strong>
+            </div>
           </div>
 
           <div className="cp-actions">
-            <button disabled={busy || !!dirty || !visible.length} onClick={download}>
+            <button
+              type="button"
+              disabled={busy || Boolean(dirty) || !visible.length}
+              onClick={download}
+            >
               {exporting ? 'جارٍ تجهيز البطاقات…' : 'تنزيل بطاقات الدرجات PDF'}
             </button>
+
             <span className="cp-muted">
-              التنزيل يشمل الطلاب الظاهرين، حتى إذا درجاتهم غير مكتملة.
+              التنزيل يشمل الطلاب الظاهرين حتى إذا درجاتهم غير مكتملة.
             </span>
           </div>
 
@@ -1561,28 +1715,39 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
             <table>
               <thead>
                 <tr>
-                  <th>اسم الطالب</th>
-                  <th>المرشد</th>
-                  {subjects.map(subject => <th key={subject}>{subject}</th>)}
-                  <th>السلوك الموجب</th>
-                  <th>السلوك السالب</th>
-                  <th>ملاحظات</th>
+                  <th scope="col">اسم الطالب</th>
+                  <th scope="col">المرشد</th>
+
+                  {subjects.map(subject => (
+                    <th scope="col" key={subject}>{subject}</th>
+                  ))}
+
+                  <th scope="col">السلوك الموجب</th>
+                  <th scope="col">السلوك السالب</th>
+                  <th scope="col">ملاحظات</th>
                 </tr>
               </thead>
+
               <tbody>
                 {visible.map(student => {
                   const id = String(student.id);
-                  const observation = changes[id] || notes.get(id) || emptyNotes;
+                  const observation =
+                    changes[id] || notes.get(id) || emptyNotes;
 
                   return (
-                    <tr key={id} className={Object.hasOwn(changes, id) ? 'cp-pending' : ''}>
+                    <tr
+                      key={id}
+                      className={Object.hasOwn(changes, id) ? 'cp-pending' : ''}
+                    >
                       <th scope="row">
                         {student.full_name}
                         <small>{student.grade} · {student.section}</small>
                       </th>
 
                       <td className="cp-advisor-name">
-                        {advisorMap.get(classKey(student.grade, student.section)) || 'لم يُحدد'}
+                        {advisorMap.get(
+                          classKey(student.grade, student.section)
+                        ) || 'لم يُحدد'}
                       </td>
 
                       {subjects.map(subject => (
@@ -1605,7 +1770,9 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
                                   ? 'السلوك السالب'
                                   : 'ملاحظات'
                             } للطالب ${student.full_name}`}
-                            onChange={event => edit(id, field, event.target.value)}
+                            onChange={event =>
+                              edit(id, field, event.target.value)
+                            }
                           />
                         </td>
                       ))}
@@ -1616,7 +1783,9 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
             </table>
           </div>
 
-          {!visible.length && <p className="cp-muted">لا يوجد طلاب مطابقون.</p>}
+          {!visible.length && (
+            <p className="cp-muted">لا يوجد طلاب مطابقون.</p>
+          )}
 
           <div className="cp-save">
             <p role="status">
@@ -1626,7 +1795,12 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
                   : 'احفظ السلوك والملاحظات قبل تنزيل الكروت.'
               )}
             </p>
-            <button disabled={busy || !dirty} onClick={save}>
+
+            <button
+              type="button"
+              disabled={busy || !dirty}
+              onClick={save}
+            >
               {saving ? 'جارٍ الحفظ…' : 'حفظ السلوك والملاحظات'}
             </button>
           </div>
@@ -1636,8 +1810,10 @@ function MonthlyCards({ students, advisors, onAdvisorsLoaded }) {
   );
 }
 
+/* الشاشة الرئيسية لقسم الحاسبات */
 export default function ComputerPage() {
   const [tab, setTab] = useState('students');
+
   const [opened, setOpened] = useState({
     students: true,
     reports: false,
@@ -1683,14 +1859,29 @@ export default function ComputerPage() {
     return () => controller.abort();
   }, [advisorRetry]);
 
-  async function refreshStudents() {
+  async function refreshStudents(deletedId) {
+    if (Number.isSafeInteger(deletedId)) {
+      setStudents(previous =>
+        previous
+          ? previous.filter(
+              student => String(student.id) !== String(deletedId)
+            )
+          : previous
+      );
+    }
+
     const rows = await readList('/api/roster');
+
     setStudents(rows);
     setRosterError('');
   }
 
   function open(value) {
-    setOpened(previous => ({ ...previous, [value]: true }));
+    setOpened(previous => ({
+      ...previous,
+      [value]: true,
+    }));
+
     setTab(value);
   }
 
@@ -1713,10 +1904,18 @@ export default function ComputerPage() {
       <div className="cp-shell">
         <header className="cp-header">
           <div className="cp-brand">
-            <img src="/hanan-logo.png" alt="" width={54} height={46} />
+            <img
+              src="/hanan-logo-new.png"
+              alt=""
+              width={54}
+              height={46}
+            />
             <strong>ثانوية حنان الأهلية للبنين</strong>
           </div>
-          <Link href="/" className="cp-back">العودة إلى حنان ←</Link>
+
+          <Link href="/" className="cp-back">
+            العودة إلى حنان ←
+          </Link>
         </header>
 
         <div className="cp-intro">
@@ -1733,6 +1932,7 @@ export default function ComputerPage() {
             ['advisors', 'مرشدو الصفوف'],
           ].map(([value, label]) => (
             <button
+              type="button"
               key={value}
               className="cp-quiet"
               aria-pressed={tab === value}
@@ -1746,22 +1946,34 @@ export default function ComputerPage() {
         {rosterError && (
           <div className="cp-notice" role="alert">
             <span>{rosterError}</span>
-            <button className="cp-quiet" onClick={() => setRosterRetry(value => value + 1)}>
+
+            <button
+              type="button"
+              className="cp-quiet"
+              onClick={() => setRosterRetry(value => value + 1)}
+            >
               إعادة تحميل الطلاب
             </button>
           </div>
         )}
 
-        {!students && !rosterError && <p role="status">جارٍ تحميل الطلاب…</p>}
+        {!students && !rosterError && (
+          <p role="status">جارٍ تحميل الطلاب…</p>
+        )}
 
         {students && (
           <>
             <div hidden={tab !== 'students'}>
-              <StudentManager students={students} refresh={refreshStudents} />
+              <StudentManager
+                students={students}
+                refresh={refreshStudents}
+              />
             </div>
 
             <div hidden={tab !== 'reports'}>
-              {opened.reports && <WeeklyReports students={students} />}
+              {opened.reports && (
+                <WeeklyReports students={students} />
+              )}
             </div>
 
             <div hidden={tab !== 'monthly'}>
@@ -1781,7 +1993,12 @@ export default function ComputerPage() {
               {advisorError && (
                 <div className="cp-notice" role="alert">
                   <span>{advisorError}</span>
-                  <button className="cp-quiet" onClick={() => setAdvisorRetry(value => value + 1)}>
+
+                  <button
+                    type="button"
+                    className="cp-quiet"
+                    onClick={() => setAdvisorRetry(value => value + 1)}
+                  >
                     إعادة تحميل المرشدين
                   </button>
                 </div>
@@ -1836,7 +2053,8 @@ export default function ComputerPage() {
         .computer-page .cp-brand,
         .computer-page .cp-toolbar,
         .computer-page .cp-actions,
-        .computer-page .cp-save {
+        .computer-page .cp-save,
+        .computer-page .cp-row-actions {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
@@ -1847,6 +2065,15 @@ export default function ComputerPage() {
         .computer-page .cp-toolbar,
         .computer-page .cp-save {
           justify-content: space-between;
+        }
+
+        .computer-page .cp-row-actions {
+          flex-wrap: nowrap;
+          gap: 8px;
+        }
+
+        .computer-page .cp-row-actions button {
+          white-space: nowrap;
         }
 
         .computer-page .cp-header {
@@ -1863,7 +2090,7 @@ export default function ComputerPage() {
           padding: 8px 12px;
           border: 1px solid var(--cp-border);
           border-radius: 9px;
-          background: white;
+          background: #fff;
           color: var(--cp-green);
           text-decoration: none;
           font-size: 14px;
@@ -1934,6 +2161,17 @@ export default function ComputerPage() {
           border-color: var(--cp-border);
           background: #fff;
           color: var(--cp-green);
+        }
+
+        .computer-page button.cp-danger {
+          border-color: #efc7c3;
+          background: #fff3f2;
+          color: #a43129;
+        }
+
+        .computer-page button.cp-danger:not(:disabled):hover {
+          border-color: #d99a94;
+          background: #ffe7e4;
         }
 
         .computer-page .cp-nav button[aria-pressed='true'] {
